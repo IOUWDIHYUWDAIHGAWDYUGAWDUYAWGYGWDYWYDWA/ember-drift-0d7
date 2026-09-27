@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------------------
+# Lumo Panel — üretim dağıtımı.
+#
+# ÖNEMLİ (yol eşleşmesi): Panel bir konteynerde çalışırken `docker run -v`
+# komutundaki yollar HOST makinede geçerli olmalıdır. Bu yüzden bot dizinini
+# konteynere AYNI mutlak yol ile mount ediyoruz. Kurulum için projeyi
+# LUMO_DIR'e klonla ve oradan `docker compose up -d` çalıştır.
+#
+#   sudo mkdir -p /opt/lumo-panel && sudo chown $USER /opt/lumo-panel
+#   git clone <repo-url> /opt/lumo-panel && cd /opt/lumo-panel
+#   cp .env.example .env   # LUMO_DIR=/opt/lumo-panel  ve PANEL_MASTER_KEY doldur
+#   docker compose up -d
+#
+# UYARI: /var/run/docker.sock mount etmek panele host üzerinde root'a denk
+# yetki verir. Ayrıntılar ve sertleştirme için README'deki "Güvenlik" bölümüne bak.
+# ---------------------------------------------------------------------------
+services:
+  panel:
+    build: .
+    image: lumo-panel:latest
+    container_name: lumo-panel
+    restart: unless-stopped
+    ports:
+      # Varsayılan: sadece localhost. Ters proxy (Caddy/nginx) arkasında kullan.
+      - "${PANEL_BIND:-127.0.0.1}:8080:8080"
+    environment:
+      PANEL_MASTER_KEY: ${PANEL_MASTER_KEY:?PANEL_MASTER_KEY .env icinde tanimlanmali}
+      PANEL_BOT_DRIVER: docker
+      PANEL_DATA_DIR: ${LUMO_DIR:?LUMO_DIR .env icinde tanimlanmali}/data
+      PANEL_BOTS_DIR: ${LUMO_DIR}/bots
+      PANEL_TRUST_PROXY: "1"
+      PANEL_SESSION_TTL_HOURS: "12"
+    volumes:
+      - ${LUMO_DIR}/data:${LUMO_DIR}/data
+      - ${LUMO_DIR}/bots:${LUMO_DIR}/bots
+      - /var/run/docker.sock:/var/run/docker.sock
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

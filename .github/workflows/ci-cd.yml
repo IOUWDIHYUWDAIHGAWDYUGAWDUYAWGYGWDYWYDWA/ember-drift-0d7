@@ -1,0 +1,94 @@
+name: CI/CD
+
+# Bu iş akışı YALNIZCA test, imaj derleme ve dağıtımdan sorumludur.
+# Bilinçli olarak burada bot ÇALIŞTIRILMAZ: GitHub Actions ücretsiz hesaplama
+# kaynağı, sürekli çalışan bir hosting/uptime motoru olarak kullanılamaz
+# (GitHub Acceptable Use Policies). Botların 7/24 çalışması panelin kendi
+# süpervizör + otomatik yeniden başlatma katmanıyla sağlanır.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Testler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Sıfır bağımlılık: npm install adımı yok, bu yüzden çok hızlı.
+      - name: Testleri çalıştır
+        run: npm test
+
+  image:
+    name: İmajı derle ve GHCR'a it
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: İmaj adını küçük harfe indir
+        id: meta
+        run: |
+          echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Registry'ye giriş
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Sunucuya dağıt
+    needs: image
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      # secrets bağlamı `if:` içinde kullanılamadığı için varlığını burada ölçüyoruz.
+      - name: Dağıtım sırları tanımlı mı?
+        id: guard
+        run: echo "ready=${{ secrets.DEPLOY_HOST != '' }}" >> "$GITHUB_OUTPUT"
+
+      - name: SSH ile güncelle
+        if: steps.guard.outputs.ready == 'true'
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            git pull --ff-only
+            docker compose pull || true
+            docker compose up -d --remove-orphans
+            docker image prune -f

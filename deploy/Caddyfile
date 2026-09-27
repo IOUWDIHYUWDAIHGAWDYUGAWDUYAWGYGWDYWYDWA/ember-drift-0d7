@@ -1,0 +1,29 @@
+# ---------------------------------------------------------------------------
+# Caddy ile otomatik HTTPS. Alan adını değiştir, sonra:
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy
+#
+# HTTPS zorunlu: oturum çerezi yalnızca HTTPS üzerinden "Secure" olarak
+# işaretlenir. Caddy arkasında panelde PANEL_TRUST_PROXY=1 olmalı.
+# ---------------------------------------------------------------------------
+panel.ornek.com {
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:8080 {
+		# Canlı konsol (SSE) akışının tamponlanmaması için şart.
+		flush_interval -1
+		# Uzun ömürlü SSE bağlantıları için zaman aşımlarını gevşet.
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/lumo-panel.log
+	}
+}
