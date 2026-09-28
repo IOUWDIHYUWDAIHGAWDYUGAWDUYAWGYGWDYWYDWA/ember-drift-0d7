@@ -1,99 +1,72 @@
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { test } from 'node:test';
 
 import {
-  encrypt,
+  createSessionToken,
   decrypt,
+  encrypt,
   hashPassword,
-  verifyPassword,
-  signToken,
-  verifyToken,
+  open,
   parseMasterKey,
+  seal,
+  verifyPassword,
+  verifySessionToken,
 } from '../server/lib/crypto.js';
-import { Store } from '../server/lib/store.js';
 
-const key = randomBytes(32);
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'lumo-test-'));
+const KEY = Buffer.alloc(32, 7);
 
-test('AES-256-GCM gidiş-dönüş', () => {
-  const samples = ['kısa', 'a'.repeat(5000), 'üç ışık 🌙 emoji', JSON.stringify({ token: 'abc.def' })];
-  for (const sample of samples) {
-    assert.equal(decrypt(key, encrypt(key, sample)), sample);
-  }
+test('ana anahtar: hex ve base64 kabul, kısa/boş anahtar reddedilir', () => {
+  assert.equal(parseMasterKey('a1'.repeat(32)).length, 32);
+  assert.equal(parseMasterKey(KEY.toString('base64')).length, 32);
+  assert.throws(() => parseMasterKey('c0ffee'), /geçersiz/i);
+  assert.throws(() => parseMasterKey(''), /PANEL_MASTER_KEY/);
+  assert.throws(() => parseMasterKey('abc'), /geçersiz/i);
+  assert.throws(() => parseMasterKey('z'.repeat(64)), /geçersiz/i);
 });
 
-test('aynı girdi her seferinde farklı şifreli çıktı verir (rastgele IV)', () => {
-  assert.notEqual(encrypt(key, 'aynı metin'), encrypt(key, 'aynı metin'));
+test('AES-256-GCM: gidiş-dönüş çalışır, kurcalama reddedilir', () => {
+  const blob = encrypt(KEY, 'gizli token');
+  assert.equal(decrypt(KEY, blob).toString('utf8'), 'gizli token');
+
+  // Aynı düz metin her seferinde farklı şifreli metin üretir (rastgele nonce).
+  assert.notDeepEqual(encrypt(KEY, 'gizli token'), blob);
+
+  const tampered = Buffer.from(blob);
+  tampered[tampered.length - 1] ^= 0x01;
+  assert.throws(() => decrypt(KEY, tampered));
+
+  const otherKey = Buffer.alloc(32, 9);
+  assert.throws(() => decrypt(otherKey, blob));
+  assert.throws(() => decrypt(KEY, Buffer.alloc(4)));
 });
 
-test('kurcalanmış şifreli veri reddedilir', () => {
-  const payload = encrypt(key, 'gizli veri');
-  const buf = Buffer.from(payload, 'base64');
-  buf[buf.length - 1] ^= 0xff; // son byte'ı boz
-  assert.throws(() => decrypt(key, buf.toString('base64')));
+test('seal/open: AAD uyuşmazsa çözülemez', () => {
+  const payload = { a: 1, b: ['x'] };
+  const sealed = seal(KEY, payload, 'lumo:state');
+  assert.deepEqual(open(KEY, sealed, 'lumo:state'), payload);
+  assert.throws(() => open(KEY, sealed, 'baska-baglam'));
 });
 
-test('yanlış anahtar çözmez', () => {
-  const payload = encrypt(key, 'gizli veri');
-  assert.throws(() => decrypt(randomBytes(32), payload));
+test('scrypt parola: doğru parola geçer, yanlış parola geçmez', () => {
+  const { salt, hash } = hashPassword('çok-gizli-parola');
+  assert.equal(verifyPassword('çok-gizli-parola', salt, hash), true);
+  assert.equal(verifyPassword('yanlış', salt, hash), false);
+  assert.equal(verifyPassword('çok-gizli-parola', salt, 'zz'), false);
+  assert.equal(verifyPassword('x', undefined, undefined), false);
+  // Aynı parola farklı salt ile farklı özet üretir.
+  assert.notEqual(hashPassword('aynı').hash, hashPassword('aynı').hash);
 });
 
-test('parola scrypt ile özetlenir ve doğrulanır', () => {
-  const { salt, hash } = hashPassword('çok-gizli-parola-123');
-  assert.ok(!hash.includes('çok-gizli'));
-  assert.equal(verifyPassword('çok-gizli-parola-123', salt, hash), true);
-  assert.equal(verifyPassword('yanlış-parola-123', salt, hash), false);
-});
+test('oturum bileti: imza, süre ve kurcalama kontrolü', () => {
+  const token = createSessionToken(KEY, { userId: 'usr-1', sessionVersion: 3, ttlMs: 60_000 });
+  const payload = verifySessionToken(KEY, token);
+  assert.equal(payload.sub, 'usr-1');
+  assert.equal(payload.ver, 3);
 
-test('aynı parola farklı salt ile farklı özet üretir', () => {
-  const a = hashPassword('aynı-parola-1234');
-  const b = hashPassword('aynı-parola-1234');
-  assert.notEqual(a.salt, b.salt);
-  assert.notEqual(a.hash, b.hash);
-});
+  assert.equal(verifySessionToken(KEY, 'garbage'), null);
+  assert.equal(verifySessionToken(KEY, `${token}x`), null);
+  assert.equal(verifySessionToken(Buffer.alloc(32, 1), token), null);
 
-test('oturum anahtarı imzalanır, kurcalanamaz ve süresi dolar', () => {
-  const token = signToken({ uid: 'u_1' }, key, 60_000);
-  assert.equal(verifyToken(token, key).uid, 'u_1');
-  assert.equal(verifyToken(token, randomBytes(32)), null);
-  assert.equal(verifyToken(`${token}x`, key), null);
-  assert.equal(verifyToken('bozuk', key), null);
-  assert.equal(verifyToken(signToken({ uid: 'u_1' }, key, -1000), key), null);
-});
-
-test('ana anahtar doğrulanır', () => {
-  assert.equal(parseMasterKey(randomBytes(32).toString('hex')).length, 32);
-  assert.equal(parseMasterKey(randomBytes(32).toString('base64')).length, 32);
-  assert.throws(() => parseMasterKey('kısa'));
-  assert.throws(() => parseMasterKey(''));
-});
-
-test('store verisi diskte düz metin görünmez, anahtarla geri açılır', () => {
-  const dir = tmp();
-  const file = path.join(dir, 'panel.enc');
-  const store = new Store({ file, key });
-  store.data.users.push({ id: 'u_1', username: 'admin', salt: 's', hash: 'h' });
-  store.data.bots.push({ id: 'bot_1', name: 'Moderasyon', env: { DISCORD_TOKEN: 'MTIz.Gizli.Token' } });
-  store.save();
-
-  const raw = fs.readFileSync(file, 'utf8');
-  assert.ok(!raw.includes('MTIz.Gizli.Token'), 'token düz metin olarak diskte');
-  assert.ok(!raw.includes('admin'), 'kullanıcı adı düz metin olarak diskte');
-
-  const reopened = new Store({ file, key });
-  assert.equal(reopened.data.bots[0].env.DISCORD_TOKEN, 'MTIz.Gizli.Token');
-  assert.equal(reopened.data.users[0].username, 'admin');
-});
-
-test('store yanlış anahtarla açılmaz', () => {
-  const dir = tmp();
-  const file = path.join(dir, 'panel.enc');
-  const store = new Store({ file, key });
-  store.data.bots.push({ id: 'bot_1', name: 'x' });
-  store.save();
-  assert.throws(() => new Store({ file, key: randomBytes(32) }));
+  const expired = createSessionToken(KEY, { userId: 'usr-1', ttlMs: -1000 });
+  assert.equal(verifySessionToken(KEY, expired), null);
 });

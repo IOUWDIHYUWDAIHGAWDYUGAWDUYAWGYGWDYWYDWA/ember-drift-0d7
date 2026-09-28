@@ -1,76 +1,128 @@
-import fs from 'node:fs';
+// Şifreli durum deposu.
+//
+// Panellerin çoğu bir veritabanı sunucusu ister; burası tek bir şifreli dosya
+// kullanır. Yazmalar atomiktir (tmp dosya → fsync → rename), yani güç kesintisi
+// ya eski ya yeni tutarlı sürümü bırakır, yarım dosya bırakmaz.
+//
+// Tüm durum AES-256-GCM ile şifrelidir: dosyayı kopyalayan biri anahtar olmadan
+// hiçbir şey okuyamaz, kurcalarsa GCM çözümlemeyi reddeder.
+
+import fs from 'node:fs/promises';
 import path from 'node:path';
-import { encrypt, decrypt, randomId } from './crypto.js';
+import { decrypt, encrypt, randomId } from './crypto.js';
 
-const EMPTY = {
-  version: 1,
-  users: [],
-  bots: [],
-  audit: [],
-};
+export const STATE_VERSION = 2;
 
-/**
- * Tüm panel durumu (kullanıcılar, bot tanımları, bot .env sırları) diske
- * AES-256-GCM ile şifrelenmiş TEK bir dosya olarak yazılır.
- * Dosyayı kopyalayan biri ana anahtar olmadan hiçbir şey okuyamaz.
- */
+export function emptyState(now = new Date()) {
+  return {
+    version: STATE_VERSION,
+    createdAt: now.toISOString(),
+    panel: { name: 'Lumo Panel' },
+    users: [],
+    eggs: [], // kullanıcı tanımlı (özel) egg'ler; yerleşikler koddadır
+    servers: [],
+    allocations: [], // { port, serverId } — port havuzu defteri
+    schedules: [],
+    backups: [],
+    audit: [],
+  };
+}
+
 export class Store {
   #file;
   #key;
-  #data;
+  #state = null;
+  #queue = Promise.resolve();
 
-  constructor({ file, key }) {
+  constructor({ file, key, aad = 'lumo:state' }) {
     this.#file = file;
     this.#key = key;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    this.#data = this.#load();
-  }
-
-  #load() {
-    if (!fs.existsSync(this.#file)) return structuredClone(EMPTY);
-    const raw = fs.readFileSync(this.#file, 'utf8').trim();
-    if (!raw) return structuredClone(EMPTY);
-    let parsed;
-    try {
-      parsed = JSON.parse(decrypt(this.#key, raw));
-    } catch (err) {
-      throw new Error(
-        `Veri dosyası çözülemedi (${this.#file}). PANEL_MASTER_KEY yanlış olabilir. Detay: ${err.message}`,
-      );
-    }
-    return { ...structuredClone(EMPTY), ...parsed };
-  }
-
-  get data() {
-    return this.#data;
+    this.aad = aad;
   }
 
   get file() {
     return this.#file;
   }
 
-  /** Atomik yazma: önce .tmp, sonra rename. Kesintide dosya bozulmaz. */
-  save() {
-    const tmp = `${this.#file}.${process.pid}.tmp`;
-    const payload = encrypt(this.#key, JSON.stringify(this.#data));
-    fs.writeFileSync(tmp, payload, { mode: 0o600 });
-    fs.renameSync(tmp, this.#file);
-    try {
-      fs.chmodSync(this.#file, 0o600);
-    } catch {
-      /* Windows'ta chmod sınırlı; sorun değil */
-    }
+  get state() {
+    if (!this.#state) throw new Error('Depo henüz yüklenmedi (await store.load()).');
+    return this.#state;
   }
 
-  /** Denetim kaydı: sadece son 500 olay tutulur, sır içermez. */
-  audit(action, { actor = 'system', detail = '' } = {}) {
-    this.#data.audit.unshift({
-      id: randomId('a_'),
-      at: new Date().toISOString(),
-      actor,
-      action,
-      detail: String(detail).slice(0, 300),
-    });
-    this.#data.audit = this.#data.audit.slice(0, 500);
+  async load() {
+    await fs.mkdir(path.dirname(this.#file), { recursive: true });
+    let raw;
+    try {
+      raw = await fs.readFile(this.#file);
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        this.#state = emptyState();
+        await this.save();
+        return this.#state;
+      }
+      throw err;
+    }
+    let json;
+    try {
+      json = decrypt(this.#key, raw, this.aad).toString('utf8');
+    } catch {
+      throw new Error(
+        `Durum dosyası çözülemedi: ${this.#file}\n` +
+          'PANEL_MASTER_KEY yanlış ya da dosya bozulmuş olabilir. Yanlış anahtarla devam etmek veriyi kalıcı olarak bozar.',
+      );
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      throw new Error(`Durum dosyası bozuk JSON içeriyor: ${this.#file}`);
+    }
+    if (parsed.version !== STATE_VERSION) {
+      throw new Error(
+        `Beklenmeyen durum sürümü (${parsed.version}); bu panel sürümü ${STATE_VERSION} bekliyor.`,
+      );
+    }
+    this.#state = { ...emptyState(), ...parsed };
+    return this.#state;
   }
+
+  /** Diske atomik yaz. Eşzamanlı çağrılar sıraya girer. */
+  async save() {
+    if (!this.#state) return;
+    const blob = encrypt(this.#key, Buffer.from(JSON.stringify(this.#state), 'utf8'), this.aad);
+    const tmp = `${this.#file}.${randomId('tmp-')}`;
+    this.#queue = this.#queue.then(async () => {
+      const handle = await fs.open(tmp, 'w', 0o600);
+      try {
+        await handle.write(blob);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await fs.rename(tmp, this.#file);
+      await fs.chmod(this.#file, 0o600).catch(() => {});
+    });
+    return this.#queue;
+  }
+
+  /** Durumu değiştir ve kaydet. Mutator senkron olmalıdır. */
+  async update(mutator) {
+    const result = mutator(this.state);
+    await this.save();
+    return result;
+  }
+}
+
+/** Denetim kaydı: kim, ne zaman, ne yaptı. Sır değerleri asla yazılmaz. */
+export function audit(state, { actor, action, target, detail, ip }, limit = 2000) {
+  state.audit.unshift({
+    id: randomId('aud-'),
+    at: new Date().toISOString(),
+    actor: actor || 'sistem',
+    action,
+    target: target || null,
+    detail: detail || null,
+    ip: ip || null,
+  });
+  if (state.audit.length > limit) state.audit.length = limit;
 }

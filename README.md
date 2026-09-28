@@ -1,254 +1,237 @@
 # Lumo Panel
 
-Discord botlarını web arayüzünden yükleyip, 7/24 çalıştıran kendi kendine yeten kontrol paneli.
-Pterodactyl'in mantığını basitleştirip modern bir arayüze indirir: her bot kendi izole ortamında
-çalışır, sırlar diske şifreli yazılır, konsol canlı akar.
+Discord botlarını (ve genel Node/Python servislerini) web arayüzünden kurup 7/24 çalıştıran
+kontrol paneli. **Pterodactyl'in mantığı** buraya taşındı — ama Laravel/MySQL/Redis/Wings
+yığını olmadan: tek Node süreci, tek şifreli durum dosyası, sıfır çalışma zamanı bağımlılığı.
 
-**Sıfır çalışma zamanı bağımlılığı.** Node 20+ dışında hiçbir şey gerekmez — `npm install` yok,
-framework yok, veritabanı sunucusu yok.
-
----
-
-## GitHub Actions konusunda net olalım
-
-İstenen şeyin bir kısmını **yapmadım ve yapmayacağım**: GitHub Actions'ı, 5 saatte bir kendini
-yeniden tetikleyerek "sonsuz" çalışan bir ücretsiz hosting motoruna çevirmek.
-
-Nedenleri kısa ve teknik:
-
-- **Kural ihlali.** GitHub'ın Kabul Edilebilir Kullanım Politikası'na göre Actions, depoyla
-  ilişkili yazılımın üretimi/testi/dağıtımı için verilir; sürekli çalışan bir servis barındırmak
-  için kullanılamaz.
-- **Teknik olarak da çalışmaz.** Her job en fazla 6 saat yaşar, runner'lar geçicidir: kalıcı disk,
-  kalıcı port ve kalıcı bellek yoktur. Discord gateway oturumu her devirde kopar, botun durumu
-  sıfırlanır. Yeniden tetikleme zinciri de bir yerde kopar.
-- **Sonuç:** ilk gün hesap askıya alınır.
-
-Bunun yerine, istenen *sonucu* gerçekten sağlayan yolu kurdum: **panel + süpervizör + bot başına
-otomatik yeniden başlatma.** Actions ise depoda yalnızca CI/CD (test, imaj derleme, sunucuya
-dağıtım) için kullanılıyor. Ücretsiz 7/24 seçenekleri için [aşağıya](#gerçek-724-seçenekleri) bak.
+> Bu sürüm, önceki sürümün yeniden yazımıdır. Yeni olan: **egg şablonları**, **port tahsisi
+> havuzu**, **kurulum adımı (installer)**, **başlangıç tespiti**, **çökme koruması**,
+> **zamanlanmış görevler**, **şifreli/güvenli yedekler**, **roller** ve **denetim kaydı**.
 
 ---
 
-## Neler var
+## Pterodactyl'den ne taşındı, ne taşınmadı
 
-| Alan | Durum |
-| --- | --- |
-| Modern koyu tema arayüz (SPA, bağımlılıksız) | ✅ |
-| Kullanıcı adı + parola girişi (scrypt), oturum çerezi | ✅ |
-| İlk açılışta yönetici kurulumu | ✅ |
-| Bot CRUD, başlat / durdur / yeniden başlat | ✅ |
-| Canlı konsol (SSE) + stdin'e girdi gönderme | ✅ |
-| Log geçmişi (son 1500 satır, sunucu tarafında) | ✅ |
-| Dosya yöneticisi: listele, oku, düzenle, yükle, sil, klasör | ✅ |
-| Sırlar: AES-256-GCM ile şifreli kasa, bota yalnızca kendi sürecinde aktarılır | ✅ |
-| Bot başına Docker izolasyonu (ağ, yetki, cpu/bellek/pid sınırı) | ✅ |
-| Otomatik yeniden başlatma (artan bekleme + çökme koruması) | ✅ |
-| Panel/ makine yeniden başlayınca botları otomatik ayağa kaldırma | ✅ |
-| Denetim kaydı (kim, ne zaman, ne yaptı — sır içermez) | ✅ |
-| 2FA (TOTP), çok kullanıcı, zamanlanmış yeniden başlatma | ⏳ yol haritasında |
+| Pterodactyl kavramı | Lumo'daki karşılığı | Durum |
+| --- | --- | --- |
+| Nest / Egg (çalışma ortamı şablonu) | `server/lib/eggs.js` + yönetici tanımlı egg'ler | ✅ |
+| Egg değişkenleri (`{{VAR}}`, sır işaretleme) | `sanitizeVariables`, `renderTemplate`, `maskVariables` | ✅ |
+| Installer container (bir kez çalışan kurulum) | `POST /api/servers/:id/power {action:"install"}` | ✅ |
+| Egg'e göre Docker imajı + başlangıç komutu | `containerArgs()` | ✅ |
+| Kaynak limitleri (bellek/CPU/pid/disk) | `--memory --cpus --pids-limit` + disk denetimi | ✅ |
+| Allocation (port havuzu, sunucuya port atama) | `server/lib/allocations.js` | ✅ |
+| Power durumları: starting/running/stopping/offline | `server/lib/servers.js` → `STATUS` | ✅ |
+| Startup detection + startup timeout | egg `startupDetection` / `startupTimeoutMs` | ✅ |
+| Otomatik yeniden başlatma + çökme koruması | artan bekleme (1s→30s) + pencere başına çökme limiti | ✅ |
+| Schedules (cron: güç / komut / yedek) | `server/lib/schedules.js` + `cron.js` | ✅ |
+| Backups (al / indir / geri yükle / saklama) | `server/lib/backups.js` (saf Node tar.gz) | ✅ |
+| Dosya yöneticisi (jail'li) | `server/lib/files.js` | ✅ |
+| Canlı konsol + stdin | SSE + `POST /input` | ✅ |
+| Alt kullanıcılar / roller | `viewer` · `operator` · `admin` | ✅ |
+| Suspension (askıya alma) | limit aşımı veya yönetici kararı | ✅ |
+| Node'lara dağıtım (Wings daemon) | Yok — tek makine. | ❌ |
+| MySQL/Redis veritabanı sunucuları | Yok — şifreli dosya durumu. | ❌ |
+| Egg üzerinden oyun sunucusu şablonları | Kapsam dışı (bot/servis odaklı). | ❌ |
+| 2FA (TOTP) | Yol haritasında. | ⏳ |
 
 ---
 
-## 3 dakikada çalıştır (Docker'sız, geliştirme)
+## Hızlı başlangıç (Docker'sız, geliştirme)
 
 ```bash
 cp .env.example .env
-# .env içine PANEL_MASTER_KEY yaz (64 hex karakter):
-node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
-
-npm start          # → http://localhost:8080
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"   # PANEL_MASTER_KEY'e yaz
+npm start                 # → http://localhost:8080
+npm test                  # 19 test
 ```
 
-İlk açılışta panel yönetici hesabı oluşturmanı ister. Sonra:
+`npm install` yok — bağımlılık listesi boş. Node 20+ yeterli.
 
-1. **Bot oluştur** → isim ver (ör. "Moderasyon").
-2. **Dosyalar** sekmesi → botunun dosyalarını yükle (`index.js`, `package.json`, `komutlar/…`).
-3. **Ayarlar** sekmesi → `DISCORD_TOKEN` ve diğer sırları ortam değişkeni olarak ekle.
-4. **Başlat** → konsoldan canlı logları izle.
+İlk açılışta panel yönetici hesabı kurmanı ister; sonra:
 
-> Bu modda `PANEL_BOT_DRIVER=local` olduğu için botlar paneli çalıştıran kullanıcıyla aynı
-> ortamı paylaşır. Hızlı denemek için uygundur, izolasyon **zayıftır**. Üretimde Docker kullan.
+1. **+ Yeni** → sunucuya ad ver, **egg** seç (Node.js/discord.js, Python/discord.py, serbest komut…).
+2. **Değişkenler** → `DISCORD_TOKEN` gibi sırları gir. Sırlar şifreli kasada tutulur ve API'de `••••••••` görünür.
+3. **Dosyalar** → botunun dosyalarını yükle, gerekirse düzenle.
+4. **Kurulumu Çalıştır** → egg'in install komutu (örn. `npm install --omit=dev`) bir kez çalışır.
+5. **Başlat** → konsoldan canlı izle. `Başlangıç tespit edildi` satırı gelince durum `running` olur.
+
+> Geliştirmede `PANEL_BOT_DRIVER=local`: süreçler panel kullanıcısıyla aynı ortamda çalışır,
+> **izolasyon zayıftır**. Üretimde `docker` kullan.
 
 ---
 
 ## Üretim kurulumu (VPS + Docker + HTTPS)
 
-Panel bir konteynerde çalışıp host'un Docker soketini kullanır. Bu yüzden **bot dizini host'ta ve
-konteynerde aynı mutlak yolda olmalıdır** (aksi halde `docker run -v` host'ta geçersiz bir yol alır).
-Compose dosyası bu yüzden `LUMO_DIR` üzerinden çalışır:
+Panel bot konteynerlerini host'un Docker soketi üzerinden başlatır; `docker run -v <yol>`
+komutundaki yol **host'ta** geçerli olmalıdır. Bu yüzden sunucu dizini host'ta ve panel
+konteynerinde aynı mutlak yolda mount edilir:
 
 ```bash
-# 1) Sunucuda projeyi sabit bir yere klonla
 sudo mkdir -p /opt/lumo-panel && sudo chown "$USER" /opt/lumo-panel
 git clone <repo-url> /opt/lumo-panel && cd /opt/lumo-panel
 
-# 2) Sırları hazırla
 cp .env.example .env
-node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"   # PANEL_MASTER_KEY'e yaz
-# .env içinde: LUMO_DIR=/opt/lumo-panel  ve  PANEL_TRUST_PROXY=1
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"   # PANEL_MASTER_KEY
+# .env içinde ayrıca: LUMO_DIR=/opt/lumo-panel  ve  PANEL_TRUST_PROXY=1
 
-# 3) Ayağa kaldır
-docker compose up -d
+docker compose up -d --build
 docker compose logs -f panel
 ```
 
-Ardından HTTPS için ters proxy (Caddy en kolayı):
+HTTPS için ters proxy (Caddy en kolayı; SSE akışını bozmaması için `flush_interval -1` ayarlıdır):
 
 ```bash
-sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # alan adını düzenle
+sudo cp deploy/Caddyfile /etc/caddy/Caddyfile     # alan adını düzenle
 sudo systemctl reload caddy
 ```
 
-Docker'sız (bare-metal) kurulum için `deploy/systemd/lumo-panel.service` hazır bir systemd birimi
-içerir: `Restart=always` sayesinde panel ölürse 3 saniyede geri gelir, sertleştirme ayarları
-(ProtectSystem, NoNewPrivileges, PrivateTmp) açıktır.
+Docker'sız kurulum için `deploy/systemd/lumo-panel.service` hazırdır:
+`Restart=always`, `ProtectSystem=strict`, boş `CapabilityBoundingSet` ve yalnızca
+`data/` + `servers/` dizinlerine yazma izni.
+
+### Klasör düzeni
+
+```
+server/
+  index.js         HTTP API, rotalar, kimlik, roller, statik dosyalar
+  lib/config.js    .env + ortam değişkenleri → tipli yapılandırma
+  lib/crypto.js    AES-256-GCM kasa, scrypt parola, HMAC oturum, ana anahtar
+  lib/store.js     atomik yazılan şifreli durum + denetim kaydı
+  lib/eggs.js      nest/egg şablonları, değişken doğrulama, `{{VAR}}` render
+  lib/docker.js    Docker sürücüsü: izolasyon bayrakları, ağ, stats, installer
+  lib/servers.js   süpervizör: durumlar, limitler, başlangıç tespiti, backoff
+  lib/files.js     realpath ile hapsedilmiş dosya yöneticisi
+  lib/backups.js   tar.gz yedek/geri yükleme + saklama politikası
+  lib/schedules.js cron görev motoru (güç / komut / yedek)
+  lib/cron.js      5 alanlı cron çözümleyici
+  lib/allocations.js  port havuzu
+  lib/tar.js       bağımlılıksız tar yazıcı/okuyucu
+  lib/http.js      gövde, çerez, güvenlik başlıkları, hız sınırı
+  lib/system.js    makine/süreç istatistikleri
+public/            arayüz (bağımlılıksız SPA, satır içi script yok)
+deploy/            systemd birimi + Caddy örneği
+tests/             node:test ile birim + uçtan uca testler
+data/              panel.enc (şifreli durum) + backups/
+servers/<id>/      bot dosyaları (yalnızca kendi konteynerine mount edilir)
+```
 
 ---
 
-## 7/24 nasıl sağlanıyor
+## API özeti
 
-Kesintisiz çalışma dört ayrı katmanın birlikte çalışmasıyla olur. Hiçbiri tek başına yeterli değil:
+Tüm uçlar `/api` altındadır. Yazma istekleri oturum çerezi ister; tarayıcı `Origin`
+başlığı gönderdiğinde eşleşmezse 403 döner. Rol gereksinimleri aşağıda belirtilmiştir.
 
-1. **Panel süreci** — systemd `Restart=always` veya Docker `restart: unless-stopped`. Panel çökerse
-   ya da makine yeniden başlarsa panel kendi kendine geri gelir.
-2. **Panel açılışı → botlar** — panel ayağa kalktığında "açılışta otomatik başlat" işaretli tüm
-   botlar kendiliğinden başlar. Böylece yeniden başlatma botları da beraberinde getirir.
-3. **Bot çökmesi → otomatik yeniden başlatma** — süreç beklenmedik şekilde ölürse artan bekleme
-   süresiyle (1s → 2s → 4s → … → en fazla 30s) yeniden başlatılır.
-4. **Çökme koruması** — bir bot saat içinde 20'den fazla çökerse döngüye girmemesi için otomatik
-   yeniden başlatma durur ve bot "koruma" durumuna geçer. Sağlıklı çalışan (60 saniyeden uzun yaşayan)
-   bir botun çökme geçmişi sıfırlanır, yani ara sıra çöken bot kalıcı olarak düşmez.
-
-Bot başına izlenebilenler: durum, PID, çalışma süresi, yeniden başlatma sayısı, çıkış kodu,
-son hata, bellek kullanımı (Linux'ta) ve tüm konsol çıktısı.
+| Yöntem | Yol | İş | Rol |
+| --- | --- | --- | --- |
+| `GET` | `/api/health` · `/api/setup/status` | Sağlık / kurulum durumu | — |
+| `POST` | `/api/setup` | İlk yönetici hesabı | — |
+| `POST` | `/api/auth/login` · `/logout` · `/password` | Oturum işlemleri | — / oturum |
+| `GET` | `/api/me` · `/api/system` · `/api/allocations` | Oturum, makine, port havuzu | izleyici |
+| `GET` | `/api/eggs` | Nest + egg listesi (sırlar gizli) | izleyici |
+| `POST`/`DELETE` | `/api/eggs[/:id]` | Özel egg ekle / sil | yönetici |
+| `GET`/`POST` | `/api/servers` | Listele / oluştur | izleyici / yönetici |
+| `GET`/`PATCH`/`DELETE` | `/api/servers/:id` | Oku / güncelle / sil (`?files=1`) | izleyici / operatör / yönetici |
+| `POST` | `/api/servers/:id/power` | `start` · `stop` · `restart` · `kill` · `install` | operatör |
+| `POST` | `/api/servers/:id/input` | Konsola girdi | operatör |
+| `GET` | `/api/servers/:id/logs?since=` · `/stream` | Log geçmişi / SSE canlı akış | izleyici |
+| `POST` | `/api/servers/:id/suspend` · `/resume` | Askıya al / çıkar | yönetici |
+| `GET`/`PUT`/`DELETE` | `/api/servers/:id/file?path=` | Dosya oku / yaz / sil | izleyici / operatör |
+| `GET` | `/api/servers/:id/files?path=` · `/usage` · `/download?path=` | Dizin, disk kullanımı, indirme | izleyici |
+| `POST` | `/api/servers/:id/mkdir` · `/rename` · `/upload` | Klasör, taşıma, çoklu yükleme | operatör |
+| `GET`/`POST` | `/api/servers/:id/backups` | Yedekleri listele / al | izleyici / operatör |
+| `GET`/`POST`/`DELETE` | `/api/backups/:id/download` · `/restore` · `/api/backups/:id` | İndir / geri yükle / sil | operatör |
+| `GET`/`POST`/`PATCH`/`DELETE` | `/api/schedules[/:id]` (+`/run`) | Zamanlanmış görevler | izleyici / operatör |
+| `GET`/`POST`/`PATCH`/`DELETE` | `/api/users[/:id]` | Kullanıcı ve rol yönetimi | yönetici |
+| `GET` | `/api/audit?limit=` | Denetim kaydı | operatör |
 
 ---
 
 ## Güvenlik modeli
 
-**Şifreleme (beklemede / at rest).**
-Panelin tüm durumu — kullanıcılar, bot tanımları, **bot token'ları** — tek bir dosyada
-(`data/panel.enc`) AES-256-GCM ile şifreli tutulur. Ana anahtar `PANEL_MASTER_KEY` ortam
-değişkeninden gelir; veritabanında veya dosyada saklanmaz. Dosyayı kopyalayan biri anahtar olmadan
-hiçbir şey okuyamaz, veriyi kurcalarsa GCM kimlik doğrulaması çözümlemeyi reddeder.
+**Beklemede şifreleme.** Panelin tüm durumu — kullanıcılar, sunucular, **bot token'ları** —
+tek dosyada (`data/panel.enc`) AES-256-GCM ile şifrelenir. Ana anahtar yalnızca
+`PANEL_MASTER_KEY` ortam değişkeninden gelir; dosyada veya veritabanında durmaz. Dosyayı
+kopyalayan biri anahtar olmadan hiçbir şey okuyamaz; kurcalarsa GCM kimlik doğrulaması
+çözümlemeyi reddeder (yanlış anahtarla açmak veriyi bozmak yerine paneli durdurur).
 
-Parolalar scrypt + rastgele salt ile tek yönlü özetlenir ve sabit zamanlı karşılaştırılır.
-Oturumlar HMAC imzalı, `HttpOnly` + `SameSite=Strict` çerezlerdir; sunucuda oturum durumu tutulmaz.
+Parolalar scrypt + rastgele salt ile özetlenir ve sabit zamanlı karşılaştırılır; kullanıcı
+yoksa da aynı maliyette scrypt çalıştırılır (kullanıcı adı zamanlama ile sızmasın diye).
+Oturumlar HMAC ile imzalanmış `HttpOnly` + `SameSite=Strict` çerezlerdir; sunucuda oturum
+tablosu yoktur ve parola değişince tüm eski çerezler anında geçersizleşir.
 
-**Panel erişimi.**
-
-- Katı CSP (`unsafe-inline` yok), `X-Frame-Options: DENY`, `nosniff`, COOP/CORP.
-- Siteler arası sahte istek koruması: `Origin` başlığı doğrulanır + `SameSite=Strict`.
-- Girişte IP başına hız sınırı (10 dakikada 10 hatalı deneme).
-- Kullanıcı adı yokken de parola doğrulaması yapılır (zamanlama ile kullanıcı adı sızmasın diye).
-- Tüm işlemler denetim kaydına yazılır (sır içermez).
+**Egg/API tarafı.** Egg değişkenleri beyaz listeye göre doğrulanır (`^[A-Z_][A-Z0-9_]*$`),
+zorunlu alanlar denetlenir, sırlar API yanıtlarında maskelenir ve denetim kaydına **asla**
+yazılmaz. Docker komutları hiçbir zaman kabuktan geçmez: `execFile`/`spawn` argüman dizisi
+kullanılır, dolayısıyla sunucu adına yazılan metin komut çalıştıramaz.
 
 **Bot izolasyonu (`docker` sürücüsü).**
-
-Her bot ayrı bir konteynerde çalışır:
 
 | Önlem | Değer |
 | --- | --- |
 | Yetenekler | `--cap-drop ALL` |
 | Ayrıcalık yükseltme | `--security-opt no-new-privileges` |
 | Kök dosya sistemi | `--read-only` (+ `/tmp` tmpfs) |
-| Kaynak sınırı | `--memory 512m --cpus 0.5 --pids-limit 256` |
-| Ağ | bot başına ayrı ağ → botlar birbirine erişemez |
-| Mount | yalnızca kendi dizini (`bots/<id>`) |
+| Kaynak sınırı | `--memory` · `--cpus` · `--pids-limit` (sunucu bazında) |
+| Ağ | bot başına ayrı köprü (`lumo-net-<id>`) → botlar birbirini göremez |
+| Mount | yalnızca kendi dizini (`servers/<id>`) |
+| Ortam | yalnızca egg değişkenleri + `PATH/HOME/TMPDIR/LANG/TZ` |
+| Port | yalnızca tahsis edilen port, varsayılan `127.0.0.1`'e bağlı |
 
-Yani bir bot ne panele ne başka bir botun dosyalarına erişemez; diğer botlara ağ üzerinden de
-bağlanamaz.
+`PANEL_MASTER_KEY` bota **sızmaz**: ortam değişkenleri `process.env` kopyalanarak değil,
+açık bir listeyle kurulur — bu davranış testlerde doğrulanır.
 
-**Panelin çalıştırma ortamı ayrıca korunur.** Panele bağlı bota `process.env` olduğu gibi
-aktarılmaz: yalnızca `PATH`, `HOME`, `TMPDIR` gibi zararsız değişkenler geçer. Böylece
-`PANEL_MASTER_KEY` bot koduna **sızmaz** (bu, `tests/bots.test.js` içinde test edilir).
-Dosya API'sinde `..`, mutlak yollar ve sembolik bağlantılar reddedilir; her yol `realpath`
-karşılaştırmasıyla bot dizinine hapsedilir.
+Yedekler geri yüklenirken her arşiv girişi yeniden doğrulanır (`..`, mutlak yol ve
+Windows sürücü harfi reddedilir), ayrıca sha256 özeti uyuşmayan arşiv geri yüklenmez.
+Dosya yöneticisi tüm yolları `realpath` ile sunucu dizinine hapseder; sembolik bağlarla
+dışarı çıkma denemesi engellenir.
 
 **Bilinen sınırlar (dürüst olalım).**
 
-- Docker soketini mount etmek panele **host üzerinde root'a denk** yetki verir. Bu yüzden paneli
-  yalnızca bu işe ayrılmış bir makinede çalıştır; mümkünse **rootless Docker** kullan.
-- `local` sürücüde botlar paneli çalıştıran kullanıcıyla aynı yetkiye sahiptir. Geliştirme dışında
-  kullanma.
-- Şifreleme "beklemede"dir: çalışan bir botun token'ı kendi süreç belleğinde düz durur (başka türlü
-  Discord'a bağlanamaz). Diski şifreleyerek (LUKS) ve dosya izinlerini kısarak bunu da sınırla.
-- 2FA ve çok kullanıcı henüz yok.
+- Docker soketini panele vermek, panele pratikte **host root'una denk** yetki verir.
+  Paneli yalnızca bu işe ayrılmış bir makinede çalıştır; mümkünse rootless Docker kullan.
+- `local` sürücüde izolasyon yoktur; geliştirme dışında kullanma. Aynı nedenle bu sürücü
+  bellek/CPU ölçümü de vermez (kutular 0 / — kalır); metrikler Docker `stats` akışından gelir.
+- Diskteki limit, konteyner seviyesinde kota değil **denetim**tir: kullanım limiti aşarsa
+  panel sunucuyu askıya alır (XFS prjquota kuruluysa `--storage-opt` ile sertleştirilebilir).
+- SSH ile çalışan botlar için idealdir; düşük gecikmeli ses (voice) kullanımı CPU
+  sınırlarından etkilenebilir.
+- Çalışan bir botun token'ı kendi süreç belleğinde düz durur (Discord'a başka türlü
+  bağlanamaz). Diski şifreleyerek (LUKS) ve dosya izinlerini kısarak sınırla.
 
 ---
 
-## Gerçek 7/24 seçenekleri
-
-| Seçenek | Ne veriyor | Not |
-| --- | --- | --- |
-| **Oracle Cloud Always Free** | 4 ARM çekirdeğe kadar kalıcı ücretsiz VM (24 GB RAM'e kadar) | Gerçek ücretsiz seçeneklerin en cömerti; kart doğrulaması ister, boşta kalan kaynak geri alınabilir |
-| **Kendi bilgisayarın / eski laptop** | Sıfır ek maliyet, panel LAN'da çalışır | Uyku modunu kapat, dinamik IP için tünel (Cloudflare Tunnel) kullan |
-| **Raspberry Pi / mini PC** | 7/24, düşük tüketim, sessiz | Tek seferlik donanım maliyeti |
-| **Fly.io / Koyeb** | Konteyner barındırma, ücretsiz kota | Uykuya dalma ve kota sınırları var; kalıcı disk ücretli olabilir |
-| **Ucuz VPS (Hetzner, Contabo…)** | ~3–5 €/ay, tam kontrol, kalıcı IP | En sorunsuz ve öngörülebilir yol |
-
-Kendi bilgisayarında çalıştırırken dışarıdan erişim için port açmak yerine
-**Cloudflare Tunnel** kullanmak daha güvenlidir: HTTPS ve kimlik doğrulama bedava gelir, router'da
-port açman gerekmez.
-
----
-
-## API özeti
-
-Tüm uçlar `/api` altındadır; yazma işlemleri oturum çerezi + `Origin` doğrulaması ister.
-
-| Yöntem | Yol | İş |
-| --- | --- | --- |
-| `GET` | `/api/health` | Sağlık kontrolü (kimlik gerekmez) |
-| `GET` | `/api/setup/status` | Kurulum gerekiyor mu (kimlik gerekmez) |
-| `POST` | `/api/setup` | İlk yönetici hesabı (yalnızca kullanıcı yokken) |
-| `POST` | `/api/auth/login` \| `/logout` | Oturum aç / kapat |
-| `POST` | `/api/auth/password` | Parola değiştir |
-| `GET` | `/api/me`, `/api/system`, `/api/audit` | Oturum, makine durumu, denetim kaydı |
-| `GET`/`POST` | `/api/bots` | Listele / oluştur |
-| `GET`/`PATCH`/`DELETE` | `/api/bots/:id` | Oku / güncelle / sil |
-| `POST` | `/api/bots/:id/start` \| `/stop` \| `/restart` \| `/input` | Yaşam döngüsü |
-| `GET` | `/api/bots/:id/logs?since=` \| `/stream` | Log geçmişi / SSE canlı akış |
-| `GET`/`PUT`/`DELETE` | `/api/bots/:id/file?path=` | Dosya oku / yaz / sil |
-| `GET` | `/api/bots/:id/files?path=` | Dizin listele |
-| `POST` | `/api/bots/:id/mkdir` \| `/upload` | Klasör oluştur / çoklu yükleme (base64) |
-
----
-
-## Geliştirme
+## Geliştirme ve testler
 
 ```bash
 npm start      # panel
-npm run dev    # --watch ile otomatik yeniden başlatma
-npm test       # 29 test: şifreleme, yol kaçışı, süreç yaşam döngüsü, uçtan uca HTTP
+npm run dev    # --watch ile yeniden başlatma
+npm test       # 19 test
 ```
 
-Testler ayrı bir süreçte gerçek panel örneği başlatır ve şunları doğrular: kurulum akışı, yetkisiz
-erişimin reddi, CSRF koruması, dosya yolu kaçışının engellenmesi, botun başlatılıp log üretmesi,
-çöken botun otomatik geri gelmesi, `PANEL_MASTER_KEY`'in bota sızmaması ve token'ların diskte düz
-metin görünmemesi.
+Arayüz CSP'si `'unsafe-inline'` olmadan çalışır: `public/` altında **satır içi `script` veya
+`style` kullanılmaz** (satır içi `style` özniteliği tarayıcıda sessizce yok sayılır). Sabit
+değerler `public/styles.css` içindeki yardımcı sınıflarla, dinamik değerler CSSOM
+(`el.style.width = ...`) ile uygulanır.
 
-```
-server/
-  index.js         HTTP sunucusu, rotalar, kimlik, statik dosyalar
-  lib/crypto.js    AES-256-GCM, scrypt, HMAC oturum, ana anahtar ayrıştırma
-  lib/store.js     Şifreli, atomik yazılan durum deposu
-  lib/bots.js      Bot süreç yöneticisi, Docker izolasyonu, log/restart mantığı
-  lib/http.js      Gövde okuma, cookie, güvenlik başlıkları, hız sınırı
-  lib/system.js    Makine ve süreç istatistikleri
-public/            Arayüz (bağımlılıksız SPA)
-deploy/            systemd birimi ve Caddy örneği
-tests/             node:test ile birim + uçtan uca testler
-```
+Testler gerçek süreçler ve gerçek bir HTTP sunucusu başlatır:
 
----
+- `tests/crypto.test.js` — ana anahtar ayrıştırma, GCM gidiş-dönüş, kurcalama reddi,
+  scrypt doğrulama, oturum bileti imzası/süresi.
+- `tests/core.test.js` — tar gidiş-dönüş (uzun yollar dahil), kötü niyetli arşiv girişleri,
+  cron ayrıştırma/eşleştirme, dosya hapsi (mutlak yol, `..`, sembolik bağ), egg doğrulama,
+  port havuzu tükenmesi.
+- `tests/servers.test.js` — başlangıç tespiti, konsola girdi, `PANEL_MASTER_KEY` sızıntısı,
+  otomatik yeniden başlatma, çökme koruması, başlangıç zaman aşımı, disk limitinde askıya alma.
+- `tests/api.test.js` — kurulum akışı, CSRF reddi, yetkisiz erişim, sunucu oluşturma,
+  başlatma, log akışı, yedek al/geri yükle, görev CRUD + çalıştırma, roller, parola değişimi
+  sonrası oturum düşmesi, yol kaçışı denemeleri, denetim kaydında sır olmaması.
 
 ## Yol haritası
 
-- TOTP tabanlı 2FA ve çok kullanıcılı roller (izleyici / operatör / yönetici)
-- Bot başına zamanlanmış yeniden başlatma (ör. her gün 04:00)
-- Docker `stats` akışıyla canlı CPU/bellek grafiği
-- Bot başlatma sırasını ve bağımlılıklarını tanımlayan "bot grupları"
-- Yedekleme: şifreli `panel.enc` + bot dizinlerinin zamanlanmış anlık görüntüsü
-- Discord OAuth ile tek tıkla bot kurulumu
+- TOTP tabanlı 2FA ve API anahtarları (otomasyon için)
+- Docker `stats` akışıyla canlı CPU/bellek grafiği (şu an 5 saniyelik örnekleme)
+- Bot grupları: başlatma sırası ve bağımlılıklar
+- Egg içi `configFiles` ile hazır yapılandırma üretimi
+- Yedeklerin S3/SFTP'ye kopyalanması ve zamanlanmış dışa aktarım
+- `--storage-opt` ile disk kotasının sertleştirilmesi

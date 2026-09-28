@@ -1,45 +1,54 @@
-# ---------------------------------------------------------------------------
-# Lumo Panel — bare-metal (Docker'sız) systemd birimi.
+# Docker'sız (bare-metal) kurulum için systemd birimi.
 #
 #   sudo cp deploy/systemd/lumo-panel.service /etc/systemd/system/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now lumo-panel
+#   sudo systemctl daemon-reload && sudo systemctl enable --now lumo-panel
 #
-# Projenin /opt/lumo-panel içinde olduğunu ve .env dosyasının doldurulduğunu
-# varsayar. Bot süreçleri aynı kullanıcıyla çalıştığı için bu kurulumda
-# PANEL_BOT_DRIVER=local kalır; tam izolasyon için Docker kurulumunu kullan.
-# ---------------------------------------------------------------------------
+# Kurulum varsayımları:
+#   • proje /opt/lumo-panel içinde
+#   • panel kullanıcısı "lumo" (sudo useradd -r -m -d /opt/lumo-panel lumo)
+#   • .env /opt/lumo-panel/.env (chmod 600, sahibi lumo)
+
 [Unit]
 Description=Lumo Panel — Discord bot kontrol paneli
-Documentation=https://github.com/
+Documentation=https://github.com/example/lumo-panel
 After=network-online.target
 Wants=network-online.target
+# Docker sürücüsü kullanılacaksa:
+After=docker.service
+Requires=docker.service
 
 [Service]
 Type=simple
 User=lumo
 Group=lumo
-# Botlar docker sürücüsüyle çalışacaksa bu satırı aç (kullanıcıyı docker grubuna ekler):
-#SupplementaryGroups=docker
 WorkingDirectory=/opt/lumo-panel
 EnvironmentFile=/opt/lumo-panel/.env
 ExecStart=/usr/bin/node server/index.js
 
-# 7/24 dayanıklılık: süreç ölürse hemen geri gelir.
+# Panel ölürse veya makine yeniden başlarsa 3 saniyede geri gelir.
 Restart=always
 RestartSec=3
-StartLimitIntervalSec=0
+TimeoutStopSec=30
 
-# Sertleştirme
-NoNewPrivileges=true
-PrivateTmp=true
+# --- Sertleştirme -----------------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
 ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-ReadWritePaths=/opt/lumo-panel/data /opt/lumo-panel/bots
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Yalnızca veri ve bot dizinlerine yazabilir.
+ReadWritePaths=/opt/lumo-panel/data /opt/lumo-panel/servers
+# Docker soketini kullanabilmek için (root grubu yerine docker grubu):
+SupplementaryGroups=docker
 
 [Install]
 WantedBy=multi-user.target

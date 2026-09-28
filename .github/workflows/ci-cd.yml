@@ -1,16 +1,20 @@
-name: CI/CD
+name: CI
 
-# Bu iş akışı YALNIZCA test, imaj derleme ve dağıtımdan sorumludur.
-# Bilinçli olarak burada bot ÇALIŞTIRILMAZ: GitHub Actions ücretsiz hesaplama
-# kaynağı, sürekli çalışan bir hosting/uptime motoru olarak kullanılamaz
-# (GitHub Acceptable Use Policies). Botların 7/24 çalışması panelin kendi
-# süpervizör + otomatik yeniden başlatma katmanıyla sağlanır.
+# Bu iş akışı yalnızca test, imaj derleme ve (elle tetiklenen) dağıtım içindir.
+# Botlar burada çalıştırılmaz: GitHub Actions koşucuları geçicidir, kalıcı disk
+# ve kalıcı port yoktur; kabul edilebilir kullanım politikası da sürekli çalışan
+# servis barındırmaya izin vermez.
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Sunucuya dağıt (docker compose up -d --build)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,74 +25,68 @@ concurrency:
 
 jobs:
   test:
-    name: Testler
+    name: Testler (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-      # Sıfır bağımlılık: npm install adımı yok, bu yüzden çok hızlı.
-      - name: Testleri çalıştır
+          node-version: ${{ matrix.node }}
+      - name: Sözdizimi kontrolü
+        run: |
+          for file in server/index.js server/lib/*.js public/app.js tests/*.js; do
+            node --check "$file"
+          done
+      - name: Sırlar sızıyor mu (kaba tarama)
+        run: |
+          if grep -rIn --exclude-dir=.git --exclude-dir=data -E "PANEL_MASTER_KEY *= *[0-9a-fA-F]{64}" .; then
+            echo "Depoda gerçek bir PANEL_MASTER_KEY var gibi görünüyor."; exit 1
+          fi
+      - name: Testler
         run: npm test
 
   image:
-    name: İmajı derle ve GHCR'a it
+    name: Docker imajı derle
     needs: test
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
-
-      - name: İmaj adını küçük harfe indir
-        id: meta
-        run: |
-          echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
       - uses: docker/setup-buildx-action@v3
-
-      - name: Registry'ye giriş
-        if: github.event_name == 'push'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/build-push-action@v6
+      - name: Derle (yayınlamadan)
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name == 'push' }}
-          tags: |
-            ${{ steps.meta.outputs.image }}:latest
-            ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          push: false
+          tags: lumo-panel:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
   deploy:
-    name: Sunucuya dağıt
-    needs: image
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    name: Sunucuya dağıt (elle)
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy
     runs-on: ubuntu-latest
+    environment: production
     steps:
-      # secrets bağlamı `if:` içinde kullanılamadığı için varlığını burada ölçüyoruz.
-      - name: Dağıtım sırları tanımlı mı?
-        id: guard
-        run: echo "ready=${{ secrets.DEPLOY_HOST != '' }}" >> "$GITHUB_OUTPUT"
-
-      - name: SSH ile güncelle
-        if: steps.guard.outputs.ready == 'true'
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            set -e
-            cd ${{ secrets.DEPLOY_PATH }}
-            git pull --ff-only
-            docker compose pull || true
-            docker compose up -d --remove-orphans
-            docker image prune -f
+      - name: SSH ile dağıt
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_KEY:-}" ] || [ -z "${DEPLOY_HOST:-}" ]; then
+            echo "DEPLOY_SSH_KEY / DEPLOY_HOST tanımlı değil; dağıtım atlandı."
+            exit 0
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh "${DEPLOY_USER:-deploy}@${DEPLOY_HOST}" \
+            'cd /opt/lumo-panel && git pull --ff-only && docker compose up -d --build && docker compose ps'

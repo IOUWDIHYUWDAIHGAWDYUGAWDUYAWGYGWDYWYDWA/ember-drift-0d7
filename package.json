@@ -1,8 +1,8 @@
 {
   "name": "lumo-panel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Discord botları için modern, şifreli, izole kontrol paneli",
+  "description": "Pterodactyl mantığını taşıyan, bağımlılıksız Discord bot kontrol paneli (egg şablonları, kaynak limitleri, zamanlanmış görevler, şifreli yedekler)",
   "type": "module",
   "engines": {
     "node": ">=20"

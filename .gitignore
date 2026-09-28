@@ -1,21 +1,12 @@
-# Sırlar ve çalışma zamanı verisi — ASLA commitlenmez
+node_modules/
+data/
 .env
 .env.*
 !.env.example
-data/
-bots/
-keys/
-*.key
-
-# Node
-node_modules/
-npm-debug.log*
-
-# Araç/oturum klasörleri
-.freebuff/
-
-# OS / editör
+*.log
 .DS_Store
-Thumbs.db
+.thumbs.db
 .idea/
 .vscode/
+coverage/
+.freebuff/
