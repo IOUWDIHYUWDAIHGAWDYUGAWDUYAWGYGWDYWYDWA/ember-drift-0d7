@@ -1,12 +1,34 @@
 # Lumo Panel
 
+[![CI](https://github.com/IOUWDIHYUWDAIHGAWDYUGAWDUYAWGYGWDYWYDWA/sessiz-kubbe-fa07/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/IOUWDIHYUWDAIHGAWDYUGAWDUYAWGYGWDYWYDWA/sessiz-kubbe-fa07/actions/workflows/ci-cd.yml)
+[![Node 20+](https://img.shields.io/badge/node-20%2B-3c873a)](https://nodejs.org)
+[![Çalışma zamanı bağımlılığı: 0](https://img.shields.io/badge/runtime%20deps-0-blue)](#)
+
 Discord botlarını (ve genel Node/Python servislerini) web arayüzünden kurup 7/24 çalıştıran
 kontrol paneli. **Pterodactyl'in mantığı** buraya taşındı — ama Laravel/MySQL/Redis/Wings
 yığını olmadan: tek Node süreci, tek şifreli durum dosyası, sıfır çalışma zamanı bağımlılığı.
 
-> Bu sürüm, önceki sürümün yeniden yazımıdır. Yeni olan: **egg şablonları**, **port tahsisi
-> havuzu**, **kurulum adımı (installer)**, **başlangıç tespiti**, **çökme koruması**,
-> **zamanlanmış görevler**, **şifreli/güvenli yedekler**, **roller** ve **denetim kaydı**.
+**Kime yarar:** aynı makinede birkaç bot çalıştırıp `ssh`/`screen`/`systemd` dosyalarıyla
+boğuşmak istemeyenlere. Panel botları **barındırmaz, yönetir**: kurulumu, kaynak limitlerini,
+otomatik yeniden başlatmayı, yedekleri ve logları tek ekranda toplar.
+
+## Öne çıkanlar
+
+- **Egg şablonları** — bir bot türü bir kez tanımlanır: Docker imajı, kurulum komutu, başlangıç
+  komutu, değişkenler ve limitler. Yeni sunucu açmak "şablon seç + token yapıştır" kadar kısa.
+- **Kaynak limitleri ve askıya alma** — sunucu başına bellek/CPU/pid/disk; diski aşan sunucu
+  otomatik askıya alınır, yönetici kararıyla da askıya alınabilir.
+- **Port havuzu (allocation)** — `30000-30099` aralığından port atanır, varsayılan olarak
+  yalnızca `127.0.0.1`'e bağlanır.
+- **Başlangıç tespiti + çökme koruması** — egg'in "başladı" deseni görülmezse süreç yeniden
+  başlatılır; artan beklemeyle (1s→30s) denenir, pencere başına çökme limiti aşılırsa durur.
+- **Zamanlanmış görevler** — cron ile güç işlemi, konsola komut veya yedek alma.
+- **Şifreli kasa + yedekler** — panelin tüm durumu AES-256-GCM ile tek dosyada; yedekler
+  sha256 doğrulamalı, dosya yöneticisi `realpath` ile hapsedilmiş.
+- **Roller ve denetim kaydı** — `viewer` / `operator` / `admin`; sırlar denetim kaydına asla yazılmaz.
+
+> Bilinçli olarak **yok**: veritabanı, mesaj kuyruğu, Wings daemon'u, çoklu makine dağıtımı,
+> oyun sunucusu şablonları. Kapsam ve dürüst sınırlar için aşağıya bak.
 
 ---
 
@@ -38,14 +60,19 @@ yığını olmadan: tek Node süreci, tek şifreli durum dosyası, sıfır çal�
 
 ## Hızlı başlangıç (Docker'sız, geliştirme)
 
-```bash
-cp .env.example .env
-node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"   # PANEL_MASTER_KEY'e yaz
-npm start                 # → http://localhost:8080
-npm test                  # 19 test
-```
+**Gereksinim:** Node 20+ — başka hiçbir şey. `npm install` adımı yok, bağımlılık listesi boş.
 
-`npm install` yok — bağımlılık listesi boş. Node 20+ yeterli.
+```bash
+git clone https://github.com/IOUWDIHYUWDAIHGAWDYUGAWDUYAWGYGWDYWYDWA/sessiz-kubbe-fa07.git
+cd sessiz-kubbe-fa07
+cp .env.example .env
+
+# ZORUNLU: ana anahtarı üret, .env içindeki PANEL_MASTER_KEY satırına yaz
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+
+npm start     # → http://localhost:8080
+npm test      # 19 test (node:test, tarayıcı gerekmez)
+```
 
 İlk açılışta panel yönetici hesabı kurmanı ister; sonra:
 
@@ -57,6 +84,10 @@ npm test                  # 19 test
 
 > Geliştirmede `PANEL_BOT_DRIVER=local`: süreçler panel kullanıcısıyla aynı ortamda çalışır,
 > **izolasyon zayıftır**. Üretimde `docker` kullan.
+>
+> Tarayıcıdan giriş yapamıyorsan: çerezler varsayılan olarak `Secure` işaretlenir. `localhost`
+> ve `127.0.0.1` bunu kabul eder; başka bir adresle (LAN IP) `http://` üzerinden bağlanıyorsan
+> `.env` içinde `PANEL_INSECURE_COOKIES=1` yap ya da önüne HTTPS koy.
 
 ---
 
@@ -68,7 +99,8 @@ konteynerinde aynı mutlak yolda mount edilir:
 
 ```bash
 sudo mkdir -p /opt/lumo-panel && sudo chown "$USER" /opt/lumo-panel
-git clone <repo-url> /opt/lumo-panel && cd /opt/lumo-panel
+git clone https://github.com/IOUWDIHYUWDAIHGAWDYUGAWDUYAWGYGWDYWYDWA/sessiz-kubbe-fa07.git /opt/lumo-panel
+cd /opt/lumo-panel
 
 cp .env.example .env
 node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"   # PANEL_MASTER_KEY
@@ -235,3 +267,11 @@ Testler gerçek süreçler ve gerçek bir HTTP sunucusu başlatır:
 - Egg içi `configFiles` ile hazır yapılandırma üretimi
 - Yedeklerin S3/SFTP'ye kopyalanması ve zamanlanmış dışa aktarım
 - `--storage-opt` ile disk kotasının sertleştirilmesi
+
+---
+
+## Lisans
+
+Bu depoda henüz bir lisans dosyası yok; yani telif hakkı saklıdır. Kendi kullanımın için
+klonlayıp çalıştırabilirsin. Yeniden dağıtmak, fork'layıp yayınlamak veya ticari bir üründe
+kullanmak istiyorsan önce bir lisans ekle (MIT veya Apache-2.0 gibi).
