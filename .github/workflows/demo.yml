@@ -1,44 +1,61 @@
 name: Canlı demo
 
-# Panelin geçici olarak internete açıldığı elle tetiklenen demo.
+# 5 saatlik döngüyle ayakta tutulan geçici panel.
 #
-# Uyarı: GitHub Actions koşucuları geçicidir. Bu iş akışı kalıcı bir sunucu
-# DEĞİLDİR — run bittiğinde makine silinir, data/panel.enc ve tüm bot dosyaları
-# kaybolur. Kalıcı kullanım için repodaki Docker/systemd kurulumunu kullanın.
+# DİKKAT — bu kalıcı bir sunucu DEĞİLDİR:
+#   * GitHub Actions koşucuları geçicidir; her turda yeni ve boş bir makine gelir.
+#   * Panel verisi (botlar, tokenlar, dosyalar) actions/cache ile turlar arasında
+#     taşınır ve PANEL_MASTER_KEY secret'ı sabit tutulur. Cache 7 gün
+#     kullanılmazsa silinir; her turda ~2-4 dakikalık kesinti olur.
+#   * GitHub'ın kabul edilebilir kullanım kuralları Actions'ı ilgisiz, sürekli
+#     çalışan servisler için kullanmayı yasaklayabilir. 7/24 kesintisiz bot
+#     barındırmak için repodaki Docker/systemd kurulumunu kalıcı bir sunucuda
+#     kullanın.
 #
-# URL herkese açık olur; bu yüzden yönetici parolası rastgele üretilir ve
-# yalnızca run özetinde gösterilir. Demo bitince adres otomatik kapanır.
+# Gerekli secret'lar:
+#   PANEL_MASTER_KEY       — 64 karakter hex; sabit kalmalı, yoksa şifreli veri açılamaz.
+#   PANEL_ADMIN_PASSWORD   — panel yönetici parolası (en az 10 karakter).
 
 on:
   workflow_dispatch:
     inputs:
       duration_minutes:
-        description: "Demo kaç dakika açık kalsın? (1-300)"
+        description: "Panel kaç dakika açık kalsın? (1-350; zamanlanmış çalışmada 295)"
         type: number
         default: 30
       admin_password:
-        description: "Yönetici parolası (en az 10 karakter; boşsa rastgele üretilir)"
+        description: "Yönetici parolası (boşsa PANEL_ADMIN_PASSWORD secret'ı kullanılır)"
         type: string
         default: ""
+  schedule:
+    # Her 5 saatte bir yeni tur; iş 295 dakika sürer, araya küçük bir boşluk kalır.
+    - cron: "0 */5 * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: demo-${{ github.ref }}
+  group: demo-live
   cancel-in-progress: true
 
 jobs:
   demo:
-    name: Geçici panel demosu
+    name: Panel demosu
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 355
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - name: Veriyi geri yükle (cache)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/lumo-data
+          key: panel-data-${{ github.run_id }}
+          restore-keys: panel-data-
 
       - name: cloudflared indir
         run: |
@@ -48,13 +65,15 @@ jobs:
           chmod +x "$RUNNER_TEMP/cloudflared"
           "$RUNNER_TEMP/cloudflared" --version
 
-      - name: Paneli başlat ve yönetici hesabı oluştur
+      - name: Paneli başlat, kurulumu tamamla ve botları başlat
         env:
-          ADMIN_PASSWORD: ${{ inputs.admin_password }}
+          MASTER_KEY_SECRET: ${{ secrets.PANEL_MASTER_KEY }}
+          ADMIN_PASSWORD_SECRET: ${{ secrets.PANEL_ADMIN_PASSWORD }}
+          ADMIN_PASSWORD_INPUT: ${{ inputs.admin_password }}
         run: |
           set -euo pipefail
 
-          export PANEL_MASTER_KEY="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')"
+          export PANEL_MASTER_KEY="${MASTER_KEY_SECRET:-$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')}"
           export PANEL_PORT=8080
           export PANEL_HOST=127.0.0.1
           export PANEL_DATA_DIR="$RUNNER_TEMP/lumo-data"
@@ -72,20 +91,48 @@ jobs:
             sleep 1
           done
           curl -fsS http://127.0.0.1:8080/api/health
-
-          if [ "${#ADMIN_PASSWORD}" -lt 10 ]; then
-            ADMIN_PASSWORD="$(node -e 'console.log(require("node:crypto").randomBytes(12).toString("base64url"))')"
-          fi
-          echo "PANEL_DEMO_PASSWORD=$ADMIN_PASSWORD" >> "$GITHUB_ENV"
-
-          curl -fsS -X POST http://127.0.0.1:8080/api/setup \
-            -H 'Content-Type: application/json' \
-            -H 'Origin: http://127.0.0.1:8080' \
-            --data "$(ADMIN_PASSWORD="$ADMIN_PASSWORD" node -e 'process.stdout.write(JSON.stringify({ username: "patron", password: process.env.ADMIN_PASSWORD }))')"
           echo
-          echo "Yönetici hesabı hazır."
 
-      - name: Tüneli aç ve adresi yaz
+          PASSWORD="$ADMIN_PASSWORD_INPUT"
+          [ -z "$PASSWORD" ] && PASSWORD="$ADMIN_PASSWORD_SECRET"
+          if [ "${#PASSWORD}" -lt 10 ]; then
+            PASSWORD="$(node -e 'console.log(require("node:crypto").randomBytes(12).toString("base64url"))')"
+          fi
+          echo "PANEL_DEMO_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+
+          CREDS="$(PASSWORD="$PASSWORD" node -e 'process.stdout.write(JSON.stringify({ username: "patron", password: process.env.PASSWORD }))')"
+          ORIGIN='Origin: http://127.0.0.1:8080'
+
+          if curl -fsS http://127.0.0.1:8080/api/setup/status | grep -q '"needsSetup":true'; then
+            curl -fsS -X POST http://127.0.0.1:8080/api/setup \
+              -H 'Content-Type: application/json' -H "$ORIGIN" --data "$CREDS"
+            echo
+            echo "Yönetici hesabı oluşturuldu."
+          else
+            echo "Panel verisi geri yüklendi; kurulum zaten tamam."
+          fi
+
+          if ! curl -fsS -c "$RUNNER_TEMP/cookie.txt" -X POST http://127.0.0.1:8080/api/auth/login \
+               -H 'Content-Type: application/json' -H "$ORIGIN" --data "$CREDS" > /dev/null; then
+            echo "Uyarı: giriş yapılamadı (secret'taki parola panelde değiştirilmiş olabilir)."
+          fi
+
+          IDS="$(curl -fsS -b "$RUNNER_TEMP/cookie.txt" http://127.0.0.1:8080/api/servers \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write((JSON.parse(s).servers||[]).map(x=>x.id).join(" "))}catch{}})')" || IDS=""
+
+          if [ -z "$IDS" ]; then
+            echo "Kayıtlı sunucu yok; panel boş başladı."
+          else
+            for id in $IDS; do
+              echo "başlatılıyor: $id"
+              curl -fsS -b "$RUNNER_TEMP/cookie.txt" -X POST "http://127.0.0.1:8080/api/servers/$id/power" \
+                -H 'Content-Type: application/json' -H "$ORIGIN" -d '{"action":"start"}' || echo "  başlatılamadı: $id"
+              echo
+            done
+          fi
+
+      - name: Tüneli aç ve adresi yayınla
+        if: always()
         run: |
           set -euo pipefail
 
@@ -107,41 +154,44 @@ jobs:
 
           curl -fsS -o /dev/null -w "tünel sağlık kontrolü: HTTP %{http_code}\n" "$URL/api/health" || true
 
-          printf '%s\n' "$URL" > "$RUNNER_TEMP/demo-adresi.txt"
-          printf 'adres=%s\nkullanici=patron\nparola=%s\n' "$URL" "$PANEL_DEMO_PASSWORD" > "$RUNNER_TEMP/demo-bilgi.txt"
+          printf 'adres=%s\nkullanici=patron\nparola=%s\n' "$URL" "${PANEL_DEMO_PASSWORD:-?}" > "$RUNNER_TEMP/demo-bilgi.txt"
 
           {
-            echo "## 🌐 Lumo Panel — geçici demo"
+            echo "## 🌐 Lumo Panel — canlı demo"
             echo
             echo "| | |"
             echo "|---|---|"
             echo "| **Adres** | $URL |"
             echo "| **Kullanıcı** | \`patron\` |"
-            echo "| **Parola** | \`$PANEL_DEMO_PASSWORD\` |"
-            echo "| **Süre** | ${{ inputs.duration_minutes }} dakika |"
+            echo "| **Parola** | \`${PANEL_DEMO_PASSWORD:-?}\` |"
+            echo "| **Bu tur** | ${{ github.event_name == 'schedule' && '295 dakika (zamanlanmış)' || format('{0} dakika (elle)', inputs.duration_minutes) }} |"
             echo
-            echo "> Bu adres geçicidir: süre dolunca koşucu kapanır ve tüm veri silinir."
+            echo "> Turlar arasında panel verisi cache'ten geri yüklenir; her yenilenmede birkaç dakikalık kesinti olur."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=Panel demo adresi::$URL"
 
       - name: Adresi artifact olarak yayınla
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: demo-adresi
-          path: |
-            ${{ runner.temp }}/demo-adresi.txt
-            ${{ runner.temp }}/demo-bilgi.txt
-          if-no-files-found: error
+          name: demo-bilgi
+          path: ${{ runner.temp }}/demo-bilgi.txt
+          if-no-files-found: warn
           retention-days: 1
 
       - name: Süre boyunca açık tut
+        if: success()
         run: |
           set -euo pipefail
-          minutes="${{ inputs.duration_minutes }}"
-          case "$minutes" in ''|*[!0-9]*) minutes=30 ;; esac
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            minutes=295
+          else
+            minutes="${{ inputs.duration_minutes }}"
+            case "$minutes" in ''|*[!0-9]*) minutes=30 ;; esac
+          fi
           [ "$minutes" -lt 1 ] && minutes=1
-          [ "$minutes" -gt 300 ] && minutes=300
-          echo "Demo $minutes dakika açık kalacak: http://127.0.0.1:8080"
+          [ "$minutes" -gt 350 ] && minutes=350
+          echo "Panel $minutes dakika açık kalacak (https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})."
           sleep $((minutes * 60))
 
       - name: Kapat
@@ -149,4 +199,12 @@ jobs:
         run: |
           pkill -f cloudflared || true
           pkill -f "node server/index.js" || true
-          echo "Demo kapatıldı."
+          sleep 2
+          echo "Panel kapatıldı."
+
+      - name: Veriyi kaydet (cache)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/lumo-data
+          key: panel-data-${{ github.run_id }}
