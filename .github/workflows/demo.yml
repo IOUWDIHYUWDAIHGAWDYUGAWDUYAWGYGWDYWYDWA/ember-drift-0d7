@@ -96,11 +96,11 @@ jobs:
           PASSWORD="$ADMIN_PASSWORD_INPUT"
           [ -z "$PASSWORD" ] && PASSWORD="$ADMIN_PASSWORD_SECRET"
           if [ "${#PASSWORD}" -lt 10 ]; then
-            PASSWORD="$(node -e 'console.log(require("node:crypto").randomBytes(12).toString("base64url"))')"
+            PASSWORD="therealvynex@hmet355"
           fi
           echo "PANEL_DEMO_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
 
-          CREDS="$(PASSWORD="$PASSWORD" node -e 'process.stdout.write(JSON.stringify({ username: "patron", password: process.env.PASSWORD }))')"
+          CREDS="$(PASSWORD="$PASSWORD" node -e 'process.stdout.write(JSON.stringify({ username: "vynex", password: process.env.PASSWORD }))')"
           ORIGIN='Origin: http://127.0.0.1:8080'
 
           if curl -fsS http://127.0.0.1:8080/api/setup/status | grep -q '"needsSetup":true'; then
@@ -154,7 +154,7 @@ jobs:
 
           curl -fsS -o /dev/null -w "tünel sağlık kontrolü: HTTP %{http_code}\n" "$URL/api/health" || true
 
-          printf 'adres=%s\nkullanici=patron\nparola=%s\n' "$URL" "${PANEL_DEMO_PASSWORD:-?}" > "$RUNNER_TEMP/demo-bilgi.txt"
+          printf 'adres=%s\nkullanici=vynex\nparola=%s\n' "$URL" "${PANEL_DEMO_PASSWORD:-?}" > "$RUNNER_TEMP/demo-bilgi.txt"
 
           {
             echo "## 🌐 Lumo Panel — canlı demo"
@@ -162,7 +162,7 @@ jobs:
             echo "| | |"
             echo "|---|---|"
             echo "| **Adres** | $URL |"
-            echo "| **Kullanıcı** | \`patron\` |"
+            echo "| **Kullanıcı** | \`vynex\` |"
             echo "| **Parola** | \`${PANEL_DEMO_PASSWORD:-?}\` |"
             echo "| **Bu tur** | ${{ github.event_name == 'schedule' && '295 dakika (zamanlanmış)' || format('{0} dakika (elle)', inputs.duration_minutes) }} |"
             echo
