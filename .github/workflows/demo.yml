@@ -1,0 +1,139 @@
+name: Canlı demo
+
+# Panelin geçici olarak internete açıldığı elle tetiklenen demo.
+#
+# Uyarı: GitHub Actions koşucuları geçicidir. Bu iş akışı kalıcı bir sunucu
+# DEĞİLDİR — run bittiğinde makine silinir, data/panel.enc ve tüm bot dosyaları
+# kaybolur. Kalıcı kullanım için repodaki Docker/systemd kurulumunu kullanın.
+#
+# URL herkese açık olur; bu yüzden yönetici parolası rastgele üretilir ve
+# yalnızca run özetinde gösterilir. Demo bitince adres otomatik kapanır.
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "Demo kaç dakika açık kalsın? (1-300)"
+        type: number
+        default: 30
+      admin_password:
+        description: "Yönetici parolası (en az 10 karakter; boşsa rastgele üretilir)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  demo:
+    name: Geçici panel demosu
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: cloudflared indir
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/cloudflared" \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod +x "$RUNNER_TEMP/cloudflared"
+          "$RUNNER_TEMP/cloudflared" --version
+
+      - name: Paneli başlat ve yönetici hesabı oluştur
+        env:
+          ADMIN_PASSWORD: ${{ inputs.admin_password }}
+        run: |
+          set -euo pipefail
+
+          export PANEL_MASTER_KEY="$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')"
+          export PANEL_PORT=8080
+          export PANEL_HOST=127.0.0.1
+          export PANEL_DATA_DIR="$RUNNER_TEMP/lumo-data"
+          export PANEL_SERVERS_DIR="$RUNNER_TEMP/lumo-data/servers"
+          export PANEL_BOT_DRIVER=local
+          export PANEL_INSECURE_COOKIES=1
+          export PANEL_ACCESS_LOG=1
+          mkdir -p "$PANEL_DATA_DIR"
+
+          nohup node server/index.js > "$RUNNER_TEMP/panel.log" 2>&1 &
+          disown || true
+
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/api/health >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/api/health
+
+          if [ "${#ADMIN_PASSWORD}" -lt 10 ]; then
+            ADMIN_PASSWORD="$(node -e 'console.log(require("node:crypto").randomBytes(12).toString("base64url"))')"
+          fi
+          echo "PANEL_DEMO_PASSWORD=$ADMIN_PASSWORD" >> "$GITHUB_ENV"
+
+          curl -fsS -X POST http://127.0.0.1:8080/api/setup \
+            -H 'Content-Type: application/json' \
+            -H 'Origin: http://127.0.0.1:8080' \
+            --data "$(ADMIN_PASSWORD="$ADMIN_PASSWORD" node -e 'process.stdout.write(JSON.stringify({ username: "patron", password: process.env.ADMIN_PASSWORD }))')"
+          echo
+          echo "Yönetici hesabı hazır."
+
+      - name: Tüneli aç ve adresi yaz
+        run: |
+          set -euo pipefail
+
+          nohup "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate --url http://127.0.0.1:8080 \
+            > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+          disown || true
+
+          URL=""
+          for _ in $(seq 1 45); do
+            URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" 2>/dev/null | head -1 || true)"
+            [ -n "$URL" ] && break
+            sleep 2
+          done
+          if [ -z "$URL" ]; then
+            echo "Tünel adresi alınamadı. cloudflared günlüğü:"
+            cat "$RUNNER_TEMP/cloudflared.log" || true
+            exit 1
+          fi
+
+          curl -fsS -o /dev/null -w "tünel sağlık kontrolü: HTTP %{http_code}\n" "$URL/api/health" || true
+
+          {
+            echo "## 🌐 Lumo Panel — geçici demo"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Adres** | $URL |"
+            echo "| **Kullanıcı** | \`patron\` |"
+            echo "| **Parola** | \`$PANEL_DEMO_PASSWORD\` |"
+            echo "| **Süre** | ${{ inputs.duration_minutes }} dakika |"
+            echo
+            echo "> Bu adres geçicidir: süre dolunca koşucu kapanır ve tüm veri silinir."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=Panel demo adresi::$URL"
+
+      - name: Süre boyunca açık tut
+        run: |
+          set -euo pipefail
+          minutes="${{ inputs.duration_minutes }}"
+          case "$minutes" in ''|*[!0-9]*) minutes=30 ;; esac
+          [ "$minutes" -lt 1 ] && minutes=1
+          [ "$minutes" -gt 300 ] && minutes=300
+          echo "Demo $minutes dakika açık kalacak: http://127.0.0.1:8080"
+          sleep $((minutes * 60))
+
+      - name: Kapat
+        if: always()
+        run: |
+          pkill -f cloudflared || true
+          pkill -f "node server/index.js" || true
+          echo "Demo kapatıldı."
