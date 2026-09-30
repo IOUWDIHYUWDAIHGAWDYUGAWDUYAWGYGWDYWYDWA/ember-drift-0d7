@@ -221,10 +221,12 @@ function renderTopbar() {
   const stats = document.getElementById('hostStats');
   if (stats && state.system) {
     const memPct = Math.round(((state.system.totalMemoryBytes - state.system.freeMemoryBytes) / state.system.totalMemoryBytes) * 100);
+    const vramStr = state.system.gpu?.available ? ` · vram ${fmtBytes(state.system.gpu.totalVramBytes)}` : '';
     stats.innerHTML = `
       <span>yük ${esc(state.system.loadAvg.join(' '))}</span>
       <span>·</span>
       <span>ram ${memPct}%</span>
+      ${vramStr ? `<span>·</span><span class="ok" style="font-weight: 600;">vram ${fmtBytes(state.system.gpu.totalVramBytes)}</span>` : ''}
       <span>·</span>
       <span>${state.system.counts.running}/${state.system.counts.servers} aktif</span>`;
   }
@@ -400,12 +402,20 @@ function renderDashboard(main) {
         </div>
         ${state.me?.role === 'admin' ? `<button class="primary" data-action="new-server">${ICONS.plus} Yeni Sunucu Oluştur</button>` : ''}
       </div>
-      <div class="grid-2 mt">
+      <div class="grid-3 mt">
         <div class="metric-card">
           <div class="metric-icon-wrap">${ICONS.server}</div>
           <div class="metric-content">
             <div class="metric-label">TOPLAM SUNUCU</div>
             <div class="metric-value mono">${state.servers.length} Adet <span class="metric-max">· ${runningCount} Çalışıyor</span></div>
+          </div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-icon-wrap">${ICONS.cpu}</div>
+          <div class="metric-content">
+            <div class="metric-label">SİSTEM VRAM / GPU</div>
+            <div class="metric-value mono">${state.system?.gpu?.available ? `${fmtBytes(state.system.gpu.totalVramBytes)}` : 'Paylaşımlı (0 B)'} <span class="metric-max">${state.system?.gpu?.available ? 'Özel VRAM' : 'Sanal GPU'}</span></div>
+            <div class="metric-sub mono">${esc(state.system?.gpu?.gpus?.[0]?.model || state.system?.gpu?.message || 'Harici VRAM Yok')}</div>
           </div>
         </div>
         <div class="metric-card">
@@ -1110,6 +1120,51 @@ function renderSystemTab(body) {
         </div>
       </div>`
           : '<div class="muted">Yükleniyor…</div>'
+      }
+    </div>
+
+    <div class="pter-card mt">
+      <div class="pter-card-header">
+        <div>
+          <h3>Grafik Donanımı ve Video Belleği (GPU & VRAM)</h3>
+          <p class="muted small">Host makinede algılanan ekran kartı ve toplam bağımsız/özel video belleği (VRAM) kapasitesi.</p>
+        </div>
+      </div>
+      ${
+        sys?.gpu
+          ? `
+      <div class="grid-2 mt">
+        <div>
+          <h4>Ekran Kartı (GPU)</h4>
+          ${
+            sys.gpu.gpus && sys.gpu.gpus.length > 0
+              ? sys.gpu.gpus
+                  .map(
+                    (g) => `
+                <div class="mono small font-bold" style="color: #fff; font-size: 0.92rem;">${esc(g.model)}</div>
+                <div class="small muted mt-sm">Bağımsız VRAM: <span class="mono font-bold ok" style="font-size: 1rem;">${fmtBytes(g.totalVramBytes)}</span></div>
+                ${g.usedVramBytes !== null ? `<div class="small muted mt-sm">Kullanılan VRAM: <span class="mono">${fmtBytes(g.usedVramBytes)}</span> (${Math.round((g.usedVramBytes / g.totalVramBytes) * 100)}%)</div>` : ''}
+              `,
+                  )
+                  .join('<hr style="border: 0; border-top: 1px solid var(--border-subtle); margin: 0.75rem 0;">')
+              : `<div class="muted small">${esc(sys.gpu.message || 'Harici GPU algılanmadı.')}</div>`
+          }
+        </div>
+        <div>
+          <h4>Toplam Sistem VRAM Durumu</h4>
+          <div class="mono" style="font-size: 1.35rem; font-weight: 700; color: ${sys.gpu.available ? 'var(--info)' : 'var(--text-muted)'}; margin-top: 0.25rem;">
+            ${sys.gpu.available ? `${fmtBytes(sys.gpu.totalVramBytes)} VRAM` : '0 Byte (Ayrılmış VRAM Yok)'}
+          </div>
+          <div class="small muted mt-sm" style="line-height: 1.5;">
+            ${
+              sys.gpu.available
+                ? 'Donanımsal bağımsız video belleği başarıyla algılandı ve sisteme tanımlandı.'
+                : 'Sanal makine / Paylaşımlı grafik ortamı. Bağımsız VRAM bulunmuyor; grafik veya hesaplama işlemleri standart sistem RAM\'ini paylaşımlı olarak kullanır.'
+            }
+          </div>
+        </div>
+      </div>`
+          : '<div class="muted small">GPU verisi bekleniyor…</div>'
       }
     </div>
 
