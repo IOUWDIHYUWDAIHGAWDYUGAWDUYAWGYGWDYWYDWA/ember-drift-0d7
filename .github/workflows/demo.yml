@@ -107,6 +107,9 @@ jobs:
 
           curl -fsS -o /dev/null -w "tünel sağlık kontrolü: HTTP %{http_code}\n" "$URL/api/health" || true
 
+          printf '%s\n' "$URL" > "$RUNNER_TEMP/demo-adresi.txt"
+          printf 'adres=%s\nkullanici=patron\nparola=%s\n' "$URL" "$PANEL_DEMO_PASSWORD" > "$RUNNER_TEMP/demo-bilgi.txt"
+
           {
             echo "## 🌐 Lumo Panel — geçici demo"
             echo
@@ -120,6 +123,16 @@ jobs:
             echo "> Bu adres geçicidir: süre dolunca koşucu kapanır ve tüm veri silinir."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice title=Panel demo adresi::$URL"
+
+      - name: Adresi artifact olarak yayınla
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-adresi
+          path: |
+            ${{ runner.temp }}/demo-adresi.txt
+            ${{ runner.temp }}/demo-bilgi.txt
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Süre boyunca açık tut
         run: |
