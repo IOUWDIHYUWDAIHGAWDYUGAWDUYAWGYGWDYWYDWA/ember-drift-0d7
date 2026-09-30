@@ -66,6 +66,13 @@ export class Store {
     try {
       json = decrypt(this.#key, raw, this.aad).toString('utf8');
     } catch {
+      if (process.env.PANEL_RESET_ON_KEY_MISMATCH === '1') {
+        console.warn(`[lumo] Durum dosyası mevcut anahtarla çözülemedi, sıfırlanıyor: ${this.#file}`);
+        await fs.copyFile(this.#file, `${this.#file}.bak`).catch(() => {});
+        this.#state = emptyState();
+        await this.save();
+        return this.#state;
+      }
       throw new Error(
         `Durum dosyası çözülemedi: ${this.#file}\n` +
           'PANEL_MASTER_KEY yanlış ya da dosya bozulmuş olabilir. Yanlış anahtarla devam etmek veriyi kalıcı olarak bozar.',

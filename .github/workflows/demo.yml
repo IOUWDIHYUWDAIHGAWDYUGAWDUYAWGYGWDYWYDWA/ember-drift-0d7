@@ -73,7 +73,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          export PANEL_MASTER_KEY="${MASTER_KEY_SECRET:-$(node -e 'console.log(require("node:crypto").randomBytes(32).toString("hex"))')}"
+          export PANEL_MASTER_KEY="${MASTER_KEY_SECRET:-4c7e6b0a8839446dfc8e9b015e1281fa7b0493821049281a9482019482019482}"
+          export PANEL_RESET_ON_KEY_MISMATCH=1
           export PANEL_PORT=8080
           export PANEL_HOST=127.0.0.1
           export PANEL_DATA_DIR="$RUNNER_TEMP/lumo-data"
@@ -90,7 +91,11 @@ jobs:
             curl -fsS http://127.0.0.1:8080/api/health >/dev/null 2>&1 && break
             sleep 1
           done
-          curl -fsS http://127.0.0.1:8080/api/health
+          if ! curl -fsS http://127.0.0.1:8080/api/health; then
+            echo "=== PANEL BAŞLATILAMADI! GÜNLÜK (panel.log): ==="
+            cat "$RUNNER_TEMP/panel.log" || true
+            exit 1
+          fi
           echo
 
           PASSWORD="$ADMIN_PASSWORD_INPUT"
