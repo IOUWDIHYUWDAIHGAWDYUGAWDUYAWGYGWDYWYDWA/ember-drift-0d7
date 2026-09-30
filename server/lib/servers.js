@@ -286,7 +286,7 @@ export class Servers extends EventEmitter {
     if (!server) throw Object.assign(new Error('Sunucu bulunamadı.'), { status: 404 });
     const egg = this.eggFor(server);
     if (!egg.install) throw Object.assign(new Error('Bu egg kurulum adımı tanımlamıyor.'), { status: 400 });
-    if (this.status(serverId) !== STATUS.OFFLINE) {
+    if (this.status(serverId) !== STATUS.OFFLINE && this.status(serverId) !== STATUS.CRASHED) {
       throw Object.assign(new Error('Kurulum yalnızca sunucu kapalıyken çalışır.'), { status: 409 });
     }
     const record = this.#record(serverId);
